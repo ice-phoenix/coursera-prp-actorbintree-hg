@@ -36,14 +36,14 @@ object BinaryTreeSet {
     */
   case class Remove(requester: ActorRef, id: Int, elem: Int) extends Operation
 
-  /** Request to perform garbage collection*/
+  /** Request to perform garbage collection */
   case object GC
 
   /** Holds the answer to the Contains request with identifier `id`.
     * `result` is true if and only if the element is present in the tree.
     */
   case class ContainsResult(id: Int, result: Boolean) extends OperationReply
-  
+
   /** Message to signal successful completion of an insert or remove operation. */
   case class OperationFinished(id: Int) extends OperationReply
 
@@ -51,6 +51,7 @@ object BinaryTreeSet {
 
 
 class BinaryTreeSet extends Actor {
+
   import BinaryTreeSet._
   import BinaryTreeNode._
 
@@ -66,7 +67,9 @@ class BinaryTreeSet extends Actor {
 
   // optional
   /** Accepts `Operation` and `GC` messages. */
-  val normal: Receive = { case _ => ??? }
+  val normal: Receive = {
+    case msg: Operation => root ! msg
+  }
 
   // optional
   /** Handles messages while garbage collection is performed.
@@ -86,12 +89,15 @@ object BinaryTreeNode {
   case class CopyTo(treeNode: ActorRef)
   case object CopyFinished
 
-  def props(elem: Int, initiallyRemoved: Boolean) = Props(classOf[BinaryTreeNode],  elem, initiallyRemoved)
+  def props(elem: Int, initiallyRemoved: Boolean) = Props(classOf[BinaryTreeNode], elem, initiallyRemoved)
 }
 
-class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
+class BinaryTreeNode(val elem: Int, val initiallyRemoved: Boolean) extends Actor {
+
   import BinaryTreeNode._
   import BinaryTreeSet._
+
+  def createNode(e: Int) = context.actorOf(BinaryTreeNode.props(e, false))
 
   var subtrees = Map[Position, ActorRef]()
   var removed = initiallyRemoved
@@ -99,9 +105,60 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
   // optional
   def receive = normal
 
+  def forwardToChild(
+                      msg: Operation,
+                      onSome: (Operation, Position, ActorRef) => Unit,
+                      onNone: (Operation, Position) => Unit
+                    ) = {
+    val pos = if (msg.elem < elem) Left else Right
+    subtrees.get(pos) match {
+      case None => onNone(msg, pos)
+      case Some(child) => onSome(msg, pos, child)
+    }
+  }
+
   // optional
   /** Handles `Operation` messages and `CopyTo` requests. */
-  val normal: Receive = { case _ => ??? }
+  val normal: Receive = {
+
+    case msg: Insert if msg.elem == elem => {
+      removed = false
+      msg.requester ! OperationFinished(msg.id)
+    }
+    case msg: Insert => {
+      forwardToChild(
+        msg,
+        (msg, _, child) => child ! msg,
+        (msg, pos) => {
+          subtrees = subtrees.updated(pos, createNode(msg.elem))
+          msg.requester ! OperationFinished(msg.id)
+        }
+      )
+    }
+
+    case msg: Contains if msg.elem == elem => {
+      msg.requester ! ContainsResult(msg.id, !removed)
+    }
+    case msg: Contains => {
+      forwardToChild(
+        msg,
+        (msg, _, child) => child ! msg,
+        (msg, _) => msg.requester ! ContainsResult(msg.id, false)
+      )
+    }
+
+    case msg: Remove if msg.elem == elem => {
+      removed = true
+      msg.requester ! OperationFinished(msg.id)
+    }
+    case msg: Remove => {
+      forwardToChild(
+        msg,
+        (msg, _, child) => child ! msg,
+        (msg, _) => msg.requester ! OperationFinished(msg.id)
+      )
+    }
+  }
 
   // optional
   /** `expected` is the set of ActorRefs whose replies we are waiting for,
